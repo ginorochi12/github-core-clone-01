@@ -56,7 +56,7 @@ function asBuffer(value: string | Uint8Array): Buffer {
 export function hashObject(type: GitObjectType, data: Uint8Array): string {
   const body = asBuffer(data);
   const hash = createHash('sha1');
-  hash.update(Buffer.from(`${type} ${body.length}\u0000`, 'utf8'));
+  hash.update(`${type} ${body.length}\u0000`, 'utf8');
   hash.update(body);
   return hash.digest('hex');
 }

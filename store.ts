@@ -577,7 +577,10 @@ export function squashTree(repo: Repo, check: MergeCheck): string {
 // ---------------------------------------------------------------------------------------------
 
 interface PackCacheEntry {
-  pack: Buffer;
+  /** The pack bytes, or null when the plan sends no objects. */
+  pack: Buffer | null;
+  /** Objects to send, sorted by oid (the cached plan's send list). */
+  send: string[];
   shallow: string[];
   unshallow: string[];
   acks: string[];

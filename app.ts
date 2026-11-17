@@ -40,12 +40,22 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     return;
   }
 
+  // Only read a body when the request declares one. GET/HEAD (and bodyless
+  // DELETEs) carry none; skipping the read avoids a promise plus three stream
+  // listeners per request on the hottest paths (the read benchmark's 2,000 GETs).
+  const hasBody =
+    (req.headers['content-length'] !== undefined && req.headers['content-length'] !== '0') ||
+    req.headers['transfer-encoding'] !== undefined;
   let body: Buffer;
-  try {
-    body = await readBody(req);
-  } catch {
-    sendError(res, 413, 'Request Entity Too Large');
-    return;
+  if (hasBody) {
+    try {
+      body = await readBody(req);
+    } catch {
+      sendError(res, 413, 'Request Entity Too Large');
+      return;
+    }
+  } else {
+    body = Buffer.alloc(0);
   }
 
   if (pathname === '/api/v3' || pathname.startsWith('/api/v3/')) {

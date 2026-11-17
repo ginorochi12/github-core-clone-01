@@ -101,6 +101,9 @@ function v2Advertisement(): Buffer {
   ]);
 }
 
+/** The v2 capability advertisement is static; build it once (every clone requests it 3x). */
+const V2_ADVERTISEMENT = v2Advertisement();
+
 function v0Advertisement(repo: Repo, service: 'git-upload-pack' | 'git-receive-pack'): Buffer {
   const caps =
     service === 'git-upload-pack'
@@ -137,7 +140,7 @@ function handleInfoRefs(req: IncomingMessage, res: ServerResponse, repo: Repo, u
   }
   const wantsV2 = service === 'git-upload-pack' && (req.headers['git-protocol'] ?? '') === 'version=2';
   if (wantsV2) {
-    sendBuffer(res, 200, v2Advertisement(), UPLOAD_ADVERTISEMENT);
+    sendBuffer(res, 200, V2_ADVERTISEMENT, UPLOAD_ADVERTISEMENT);
     return;
   }
   const body = v0Advertisement(repo, service);
@@ -246,26 +249,57 @@ function planFetch(
   }
   unshallow.sort();
 
-  // ACKs: haves that are ancestors of (or equal to) a want.
-  const fullWanted = collectReachable(wants, lookup, { allowMissing: true });
-  const acks = haves.filter((have) => fullWanted.has(have));
+  // ACKs: haves that are ancestors of (or equal to) a want. With no haves there
+  // can be no ACKs, so skip the full-history walk entirely (the common clone case).
+  const acks: string[] = [];
+  if (haves.length > 0) {
+    const fullWanted = collectReachable(wants, lookup, { allowMissing: true });
+    for (const have of haves) if (fullWanted.has(have)) acks.push(have);
+  }
 
   return { send, shallow, unshallow, acks };
 }
 
-/** Build (or reuse from the cache) the pack and shallow info for a fetch plan. */
-function packForFetch(repo: Repo, plan: FetchPlan, cacheKey: string): { pack: Buffer | null; shallow: string[]; unshallow: string[]; acks: string[] } {
-  if (plan.send.length === 0) return { pack: null, shallow: plan.shallow, unshallow: plan.unshallow, acks: plan.acks };
+/**
+ * Plan a fetch and build its pack, reusing the cache for repeat requests.
+ * The plan is deterministic for a given (repo state, wants, haves, shallow, depth),
+ * and the cache is dropped on every mutation, so a cached plan+pack is always fresh.
+ * Empty sends are cached too (pack null) so repeat "nothing new" fetches are free.
+ */
+function fetchPlanAndPack(
+  repo: Repo,
+  wants: string[],
+  haves: string[],
+  clientShallow: string[],
+  depth: number | null,
+  cacheKey: string,
+): { plan: FetchPlan; pack: Buffer | null } {
   const cached = packCacheGet(cacheKey);
-  if (cached) return { pack: cached.pack, shallow: cached.shallow, unshallow: cached.unshallow, acks: cached.acks };
-  const objects: GitObject[] = [];
-  for (const oid of plan.send) {
-    const object = repo.objects.get(oid);
-    if (object) objects.push(object);
+  if (cached) {
+    return {
+      plan: { send: cached.send, shallow: cached.shallow, unshallow: cached.unshallow, acks: cached.acks },
+      pack: cached.pack,
+    };
   }
-  const pack = writePack(objects);
-  packCacheSet(cacheKey, { pack, shallow: plan.shallow, unshallow: plan.unshallow, acks: plan.acks, hasObjects: true });
-  return { pack, shallow: plan.shallow, unshallow: plan.unshallow, acks: plan.acks };
+  const plan = planFetch(repo, wants, haves, clientShallow, depth);
+  let pack: Buffer | null = null;
+  if (plan.send.length > 0) {
+    const objects: GitObject[] = [];
+    for (const oid of plan.send) {
+      const object = repo.objects.get(oid);
+      if (object) objects.push(object);
+    }
+    pack = writePack(objects);
+  }
+  packCacheSet(cacheKey, {
+    pack,
+    send: plan.send,
+    shallow: plan.shallow,
+    unshallow: plan.unshallow,
+    acks: plan.acks,
+    hasObjects: plan.send.length > 0,
+  });
+  return { plan, pack };
 }
 
 /** Split a pack into sideband band-1 packets (32 KiB chunks, well under the pkt-line limit). */
@@ -274,7 +308,9 @@ function sidebandPack(pack: Buffer): Buffer[] {
   const CHUNK = 32768;
   for (let offset = 0; offset < pack.length; offset += CHUNK) {
     const slice = pack.subarray(offset, Math.min(offset + CHUNK, pack.length));
-    const payload = Buffer.concat([Buffer.from([1]), slice]);
+    const payload = Buffer.allocUnsafe(slice.length + 1);
+    payload[0] = 1;
+    slice.copy(payload, 1);
     parts.push(encodePktLine(payload));
   }
   return parts;
@@ -377,9 +413,9 @@ function handleFetchV2(repo: Repo, args: string[]): Buffer {
     }
     // thin-pack, no-progress, ofs-delta, done, filter, deepen-since, deepen-not: accepted, ignored.
   }
-  const plan = planFetch(repo, wants, haves, shallow, depth);
   const cacheKey = `${repo.id}|${[...wants].sort().join(',')}|${[...haves].sort().join(',')}|${[...shallow].sort().join(',')}|${depth ?? ''}`;
-  const { pack, shallow: newShallow, unshallow, acks } = packForFetch(repo, plan, cacheKey);
+  const { plan, pack } = fetchPlanAndPack(repo, wants, haves, shallow, depth, cacheKey);
+  const { shallow: newShallow, unshallow, acks } = plan;
 
   const parts: Buffer[] = [];
   // acknowledgments
@@ -448,9 +484,9 @@ function handleFetchV0(repo: Repo, body: Buffer): Buffer | null {
       }
     }
   }
-  const plan = planFetch(repo, wants, haves, shallow, depth);
   const cacheKey = `v0|${repo.id}|${[...wants].sort().join(',')}|${[...haves].sort().join(',')}|${[...shallow].sort().join(',')}|${depth ?? ''}`;
-  const { pack, shallow: newShallow, unshallow, acks } = packForFetch(repo, plan, cacheKey);
+  const { plan, pack } = fetchPlanAndPack(repo, wants, haves, shallow, depth, cacheKey);
+  const { shallow: newShallow, unshallow, acks } = plan;
 
   const parts: Buffer[] = [];
   for (const oid of newShallow) parts.push(encodePktLine(`shallow ${oid}\n`));

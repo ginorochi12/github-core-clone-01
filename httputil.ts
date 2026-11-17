@@ -20,15 +20,15 @@ function baseHeaders(extra: Readonly<Record<string, string>> = {}): Record<strin
   return { 'x-github-request-id': nextRequestId(), ...extra };
 }
 
-/** Answer with a JSON body. */
+/** Answer with a JSON body. The body is encoded once; its byte length is the buffer's. */
 export function sendJson(res: ServerResponse, status: number, body: unknown, headers: Readonly<Record<string, string>> = {}): void {
-  const text = `${JSON.stringify(body)}\n`;
+  const buf = Buffer.from(`${JSON.stringify(body)}\n`, 'utf8');
   res.writeHead(status, {
     'content-type': JSON_TYPE,
-    'content-length': Buffer.byteLength(text),
+    'content-length': buf.length,
     ...baseHeaders(headers),
   });
-  res.end(text);
+  res.end(buf);
 }
 
 /** Answer with a raw buffer body and an explicit content type. */
