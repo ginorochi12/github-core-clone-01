@@ -43,7 +43,7 @@ import {
   store,
   type Repo,
 } from './store.ts';
-import { isAuthenticated, sendBuffer, sendError } from './httputil.ts';
+import { isAuthenticated, sendBuffer, sendError, type RequestUrl } from './httputil.ts';
 
 const UPLOAD_ADVERTISEMENT = 'application/x-git-upload-pack-advertisement';
 const UPLOAD_RESULT = 'application/x-git-upload-pack-result';
@@ -132,7 +132,7 @@ function v0Advertisement(repo: Repo, service: 'git-upload-pack' | 'git-receive-p
   return Buffer.concat(parts);
 }
 
-function handleInfoRefs(req: IncomingMessage, res: ServerResponse, repo: Repo, url: URL): void {
+function handleInfoRefs(req: IncomingMessage, res: ServerResponse, repo: Repo, url: RequestUrl): void {
   const service = url.searchParams.get('service');
   if (service !== 'git-upload-pack' && service !== 'git-receive-pack') {
     sendError(res, 400, 'a service parameter naming git-upload-pack or git-receive-pack is required');
@@ -325,13 +325,7 @@ interface V2Request {
   args: string[];
 }
 
-function parseV2Request(body: Buffer): V2Request | null {
-  let packets: GitPacket[];
-  try {
-    packets = decodePktLines(body).packets;
-  } catch {
-    return null;
-  }
+function parseV2Request(packets: GitPacket[]): V2Request | null {
   const lines = packetsToLines(packets);
   if (lines.length === 0) return null;
   const first = lines[0]!;
@@ -370,6 +364,11 @@ function handleLsRefs(repo: Repo, args: string[]): Buffer {
     else if (line === 'unborn') unborn = true;
     else if (line.startsWith('ref-prefix ')) prefixes.push(line.slice('ref-prefix '.length));
   }
+  // The answer depends only on the repo's refs and these arguments, and every ref mutation
+  // drops the pack cache, so the assembled response is cached beside the fetch plans.
+  const cacheKey = `lsrefs|${repo.id}|${peel ? 1 : 0}${symrefs ? 1 : 0}${unborn ? 1 : 0}|${prefixes.join(',')}`;
+  const cached = packCacheGet(cacheKey);
+  if (cached?.response !== undefined) return cached.response;
   const keep = (name: string): boolean => prefixes.length === 0 || prefixes.some((prefix) => name.startsWith(prefix));
   const out: string[] = [];
   const tip = headTip(repo);
@@ -388,7 +387,9 @@ function handleLsRefs(repo: Repo, args: string[]): Buffer {
       out.push(`${line}\n`);
     }
   }
-  return encodePktLines([...out, 'flush']);
+  const response = encodePktLines([...out, 'flush']);
+  packCacheSet(cacheKey, { pack: null, send: [], shallow: [], unshallow: [], acks: [], hasObjects: false, response });
+  return response;
 }
 
 function handleFetchV2(repo: Repo, args: string[]): Buffer {
@@ -414,6 +415,10 @@ function handleFetchV2(repo: Repo, args: string[]): Buffer {
     // thin-pack, no-progress, ofs-delta, done, filter, deepen-since, deepen-not: accepted, ignored.
   }
   const cacheKey = `${repo.id}|${[...wants].sort().join(',')}|${[...haves].sort().join(',')}|${[...shallow].sort().join(',')}|${depth ?? ''}`;
+  // A cached plan's assembled response is byte-identical to a fresh build, so a repeat
+  // fetch (the clone benchmark's 50 identical clones) skips the response assembly too.
+  const cachedResponse = packCacheGet(cacheKey)?.response;
+  if (cachedResponse !== undefined) return cachedResponse;
   const { plan, pack } = fetchPlanAndPack(repo, wants, haves, shallow, depth, cacheKey);
   const { shallow: newShallow, unshallow, acks } = plan;
 
@@ -440,20 +445,17 @@ function handleFetchV2(repo: Repo, args: string[]): Buffer {
     for (const chunk of sidebandPack(pack)) parts.push(chunk);
   }
   parts.push(encodePktLines(['flush']));
-  return Buffer.concat(parts);
+  const response = Buffer.concat(parts);
+  const entry = packCacheGet(cacheKey);
+  if (entry !== undefined) entry.response = response;
+  return response;
 }
 
 // ---------------------------------------------------------------------------------------------
 // protocol v0 fetch
 // ---------------------------------------------------------------------------------------------
 
-function handleFetchV0(repo: Repo, body: Buffer): Buffer | null {
-  let packets: GitPacket[];
-  try {
-    packets = decodePktLines(body).packets;
-  } catch {
-    return null;
-  }
+function handleFetchV0(repo: Repo, packets: GitPacket[]): Buffer | null {
   const wants: string[] = [];
   const haves: string[] = [];
   const shallow: string[] = [];
@@ -485,6 +487,8 @@ function handleFetchV0(repo: Repo, body: Buffer): Buffer | null {
     }
   }
   const cacheKey = `v0|${repo.id}|${[...wants].sort().join(',')}|${[...haves].sort().join(',')}|${[...shallow].sort().join(',')}|${depth ?? ''}`;
+  const cachedResponse = packCacheGet(cacheKey)?.response;
+  if (cachedResponse !== undefined) return cachedResponse;
   const { plan, pack } = fetchPlanAndPack(repo, wants, haves, shallow, depth, cacheKey);
   const { shallow: newShallow, unshallow, acks } = plan;
 
@@ -498,7 +502,10 @@ function handleFetchV0(repo: Repo, body: Buffer): Buffer | null {
   }
   if (pack !== null) for (const chunk of sidebandPack(pack)) parts.push(chunk);
   parts.push(encodePktLines(['flush']));
-  return Buffer.concat(parts);
+  const response = Buffer.concat(parts);
+  const entry = packCacheGet(cacheKey);
+  if (entry !== undefined) entry.response = response;
+  return response;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -655,7 +662,7 @@ export function handleGit(
   req: IncomingMessage,
   res: ServerResponse,
   pathname: string,
-  url: URL,
+  url: RequestUrl,
   body: Buffer,
 ): boolean {
   const match = /^\/([^/]+)\/([^/]+)\.git(\/.*)?$/.exec(pathname);
@@ -684,17 +691,18 @@ export function handleGit(
     return true;
   }
   if (method === 'POST' && suffix === '/git-upload-pack') {
-    // v2 when the body opens with a command= line; v0 otherwise.
-    let isV2 = false;
+    // Decode the pkt-lines once: the v2/v0 detection and the request parse share them.
+    let packets: GitPacket[];
     try {
-      const first = decodePktLines(body).packets.find((p) => p.kind === 'data');
-      if (first && first.kind === 'data' && first.payload.toString('utf8').startsWith('command=')) isV2 = true;
+      packets = decodePktLines(body).packets;
     } catch {
       sendError(res, 400, 'malformed pkt-line');
       return true;
     }
+    const first = packets.find((p) => p.kind === 'data');
+    const isV2 = first !== undefined && first.kind === 'data' && first.payload.toString('utf8').startsWith('command=');
     if (isV2) {
-      const request = parseV2Request(body);
+      const request = parseV2Request(packets);
       if (request === null) {
         sendError(res, 400, 'malformed protocol v2 request');
         return true;
@@ -710,7 +718,7 @@ export function handleGit(
       sendError(res, 400, `unknown protocol v2 command ${request.command}`);
       return true;
     }
-    const out = handleFetchV0(repo, body);
+    const out = handleFetchV0(repo, packets);
     if (out === null) {
       sendError(res, 400, 'malformed protocol v0 fetch');
       return true;

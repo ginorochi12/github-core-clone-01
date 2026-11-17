@@ -5,6 +5,19 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 
 export const JSON_TYPE = 'application/json; charset=utf-8';
 
+/**
+ * The URL surface handlers read: the path plus the parsed query. A real URL satisfies this,
+ * and app.ts hands handlers a cheap shim of the same shape for plain paths (no query at all),
+ * so the hot paths skip the WHATWG URL constructor.
+ */
+export interface RequestUrl {
+  readonly pathname: string;
+  readonly searchParams: URLSearchParams;
+}
+
+/** One shared empty query set for plain-path requests (handlers never mutate it). */
+export const EMPTY_SEARCH_PARAMS = new URLSearchParams();
+
 /** The token the env presents (MAKEFUN_SHOP_TOKEN in a trial); '' when unset. */
 const SHOP_TOKEN = process.env.MAKEFUN_SHOP_TOKEN ?? '';
 
@@ -20,9 +33,14 @@ function baseHeaders(extra: Readonly<Record<string, string>> = {}): Record<strin
   return { 'x-github-request-id': nextRequestId(), ...extra };
 }
 
+/** Serialize a value exactly as sendJson sends it: JSON plus a trailing newline. */
+export function jsonBuffer(body: unknown): Buffer {
+  return Buffer.from(`${JSON.stringify(body)}\n`, 'utf8');
+}
+
 /** Answer with a JSON body. The body is encoded once; its byte length is the buffer's. */
 export function sendJson(res: ServerResponse, status: number, body: unknown, headers: Readonly<Record<string, string>> = {}): void {
-  const buf = Buffer.from(`${JSON.stringify(body)}\n`, 'utf8');
+  const buf = jsonBuffer(body);
   res.writeHead(status, {
     'content-type': JSON_TYPE,
     'content-length': buf.length,

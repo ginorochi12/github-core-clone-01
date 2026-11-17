@@ -17,19 +17,51 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { handleGit } from './githttp.ts';
 import { handleGraphQL } from './graphql.ts';
-import { readBody, sendError, sendJson } from './httputil.ts';
+import { EMPTY_SEARCH_PARAMS, readBody, sendError, sendJson, type RequestUrl } from './httputil.ts';
 import { handleMcp } from './mcp.ts';
 import { handleRest } from './rest.ts';
 
-async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  let url: URL;
-  try {
-    url = new URL(req.url ?? '/', 'http://127.0.0.1');
-  } catch {
-    sendError(res, 400, 'Bad Request');
-    return;
+/**
+ * Whether the WHATWG URL parser would leave this request target's path byte-identical:
+ * no query or fragment, no backslash, no percent-encoding, no whitespace, control or
+ * non-ASCII character (the parser percent-encodes those), and no dot or empty segment
+ * for it to normalize. Plain suite paths qualify; anything unusual falls back to the
+ * real parser, so behavior never differs.
+ */
+function isPlainPath(raw: string): boolean {
+  if (!raw.startsWith('/')) return false;
+  for (let i = 0; i < raw.length; i += 1) {
+    const c = raw.charCodeAt(i);
+    if (c <= 0x20 || c >= 0x7f || c === 0x3f || c === 0x23 || c === 0x5c || c === 0x25) return false;
   }
-  const pathname = url.pathname;
+  return (
+    !raw.includes('//') &&
+    !raw.includes('/./') &&
+    !raw.includes('/../') &&
+    !raw.endsWith('/.') &&
+    !raw.endsWith('/..')
+  );
+}
+
+async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const raw = req.url ?? '/';
+  let pathname: string;
+  let url: RequestUrl;
+  if (isPlainPath(raw)) {
+    // The common case: the path is its own pathname and there is no query to parse.
+    pathname = raw;
+    url = { pathname, searchParams: EMPTY_SEARCH_PARAMS };
+  } else {
+    let parsed: URL;
+    try {
+      parsed = new URL(raw, 'http://127.0.0.1');
+    } catch {
+      sendError(res, 400, 'Bad Request');
+      return;
+    }
+    pathname = parsed.pathname;
+    url = parsed;
+  }
 
   if (pathname === '/healthz') {
     if (req.method === 'GET') {

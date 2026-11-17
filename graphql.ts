@@ -16,7 +16,7 @@
  *   document that does not parse.
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { isAuthenticated, parseJsonBody, sendError, sendJson } from './httputil.ts';
+import { isAuthenticated, parseJsonBody, sendError, sendJson, type RequestUrl } from './httputil.ts';
 import {
   createIssueObject,
   createPullObject,
@@ -28,6 +28,7 @@ import {
   branchTip,
   checkMerge,
   diffCommits,
+  invalidateIssueJson,
   store,
   type Issue,
   type PullRequest,
@@ -772,6 +773,7 @@ function resolveField(typeName: string, parent: Obj, field: FieldNode, ctx: Exec
         if (repo === undefined || issue === undefined) throw new GraphQLError('closeIssue: issue not found');
         issue.state = 'closed';
         issue.closedAt = issue.updatedAt;
+        invalidateIssueJson(issue);
         return { __typename: 'CloseIssuePayload', data: { repo, issue } };
       }
       case 'createPullRequest': {
@@ -820,6 +822,7 @@ function resolveField(typeName: string, parent: Obj, field: FieldNode, ctx: Exec
           updatedAt: issue.updatedAt,
         };
         issue.comments.push(comment);
+        invalidateIssueJson(issue);
         return { __typename: 'AddCommentPayload', data: { repo, issue, comment } };
       }
       default:
@@ -1149,7 +1152,7 @@ export function handleGraphQL(
   req: IncomingMessage,
   res: ServerResponse,
   pathname: string,
-  _url: URL,
+  _url: RequestUrl,
   body: Buffer,
 ): boolean {
   if (pathname !== '/api/graphql') return false;

@@ -53,6 +53,19 @@ export interface Issue {
   updatedAt: string;
   closedAt: string | null;
   comments: IssueComment[];
+  /**
+   * Cached serialized REST body (the issueJson object as sendJson sends it, JSON + '\n'),
+   * or undefined when the issue has changed since it was built. Valid because every field
+   * issueJson reads is either immutable (id, number, userLogin, createdAt, the repo's
+   * owner/name, label colors — labels are never edited or deleted) or cleared below by
+   * every mutation of the issue (REST PATCH, REST comment, GraphQL closeIssue/addComment).
+   */
+  cachedJson?: Buffer;
+}
+
+/** Drop an issue's cached REST body: call before any mutation of the issue's fields. */
+export function invalidateIssueJson(issue: Issue): void {
+  issue.cachedJson = undefined;
 }
 
 export interface PullRequest {
@@ -585,6 +598,12 @@ interface PackCacheEntry {
   unshallow: string[];
   acks: string[];
   hasObjects: boolean;
+  /**
+   * The fully assembled fetch (or ls-refs) response for this entry's key, or undefined
+   * when only the plan/pack is cached. The entry is dropped by invalidatePackCache on
+   * every git-state mutation, so a cached response is always fresh.
+   */
+  response?: Buffer;
 }
 
 const PACK_CACHE_MAX = 128;

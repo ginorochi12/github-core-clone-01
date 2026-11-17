@@ -14,6 +14,7 @@ import {
   commitView,
   createCommit,
   diffCommits,
+  invalidateIssueJson,
   invalidatePackCache,
   listBranches,
   listTreeDir,
@@ -28,7 +29,17 @@ import {
   type PullRequest,
   type Repo,
 } from './store.ts';
-import { isAuthenticated, parseJsonBody, sendEmpty, sendError, sendJson } from './httputil.ts';
+import {
+  isAuthenticated,
+  jsonBuffer,
+  parseJsonBody,
+  sendBuffer,
+  sendEmpty,
+  sendError,
+  sendJson,
+  JSON_TYPE,
+  type RequestUrl,
+} from './httputil.ts';
 
 // ---------------------------------------------------------------------------------------------
 // serialization
@@ -76,6 +87,30 @@ export function issueJson(repo: Repo, issue: Issue): Record<string, unknown> {
     html_url: `https://github.com/${repo.owner}/${repo.name}/issues/${issue.number}`,
     url: `/api/v3/repos/${repo.owner}/${repo.name}/issues/${issue.number}`,
   };
+}
+
+/**
+ * Answer a single-issue GET from the issue's cached body when it is fresh, else serialize
+ * and cache it. The cached bytes are exactly what sendJson would send (JSON + '\n'), so a
+ * cache hit is byte-identical to a fresh build. The read benchmark GETs one issue 2,000
+ * times, so this removes the object build, the stringify and the buffer allocation per read.
+ */
+function serveIssue(res: ServerResponse, repo: Repo, issue: Issue): void {
+  const cached = issue.cachedJson;
+  if (cached !== undefined) {
+    sendBuffer(res, 200, cached, JSON_TYPE);
+    return;
+  }
+  const buf = jsonBuffer(issueJson(repo, issue));
+  issue.cachedJson = buf;
+  sendBuffer(res, 200, buf, JSON_TYPE);
+}
+
+/** Answer a create/PATCH with a freshly built body, and cache it: the issue just changed. */
+function sendFreshIssue(res: ServerResponse, status: number, repo: Repo, issue: Issue): void {
+  const buf = jsonBuffer(issueJson(repo, issue));
+  issue.cachedJson = buf;
+  sendBuffer(res, status, buf, JSON_TYPE);
 }
 
 export function commentJson(repo: Repo, issue: Issue, comment: Issue['comments'][number]): Record<string, unknown> {
@@ -147,7 +182,7 @@ interface PageParams {
   perPage: number;
 }
 
-function pageParams(url: URL): PageParams {
+function pageParams(url: RequestUrl): PageParams {
   const page = Number.parseInt(url.searchParams.get('page') ?? '1', 10);
   const perPage = Number.parseInt(url.searchParams.get('per_page') ?? '30', 10);
   return {
@@ -157,7 +192,7 @@ function pageParams(url: URL): PageParams {
 }
 
 /** Slice a list into one page and build GitHub's Link header (absolute, same-origin URLs). */
-function paginate<T>(req: IncomingMessage, url: URL, items: readonly T[]): { page: T[]; link: string | null } {
+function paginate<T>(req: IncomingMessage, url: RequestUrl, items: readonly T[]): { page: T[]; link: string | null } {
   const { page, perPage } = pageParams(url);
   const total = items.length;
   const totalPages = Math.max(1, Math.ceil(total / perPage));
@@ -179,7 +214,7 @@ function paginate<T>(req: IncomingMessage, url: URL, items: readonly T[]): { pag
   return { page: slice, link: links.length > 0 ? links.join(', ') : null };
 }
 
-function sendPage<T>(req: IncomingMessage, res: ServerResponse, url: URL, items: readonly T[]): void {
+function sendPage<T>(req: IncomingMessage, res: ServerResponse, url: RequestUrl, items: readonly T[]): void {
   const { page, link } = paginate(req, url, items);
   sendJson(res, 200, page, link === null ? {} : { link });
 }
@@ -217,7 +252,7 @@ function contentsBranch(repo: Repo, body: Record<string, unknown>): string {
   return branch !== undefined && branch !== '' ? branch : repo.defaultBranch;
 }
 
-function handleGetContents(req: IncomingMessage, res: ServerResponse, repo: Repo, url: URL, path: string): void {
+function handleGetContents(req: IncomingMessage, res: ServerResponse, repo: Repo, url: RequestUrl, path: string): void {
   const ref = url.searchParams.get('ref') ?? repo.defaultBranch;
   const commit = resolveRef(repo, ref);
   if (commit === null) {
@@ -453,7 +488,7 @@ export function handleRest(
   req: IncomingMessage,
   res: ServerResponse,
   pathname: string,
-  url: URL,
+  url: RequestUrl,
   body: Buffer,
 ): boolean {
   if (pathname !== '/api/v3' && !pathname.startsWith('/api/v3/')) return false;
@@ -557,7 +592,7 @@ export function handleRest(
 function handleRepoRoute(
   req: IncomingMessage,
   res: ServerResponse,
-  url: URL,
+  url: RequestUrl,
   repo: Repo,
   rest: string[],
   method: string,
@@ -730,7 +765,7 @@ function handleRepoRoute(
 function handleIssueRoute(
   req: IncomingMessage,
   res: ServerResponse,
-  url: URL,
+  url: RequestUrl,
   repo: Repo,
   tail: string[],
   method: string,
@@ -752,7 +787,7 @@ function handleIssueRoute(
         sendError(res, created.status, created.error);
         return true;
       }
-      sendJson(res, 201, issueJson(repo, created.issue));
+      sendFreshIssue(res, 201, repo, created.issue);
       return true;
     }
     if (method === 'GET') {
@@ -782,10 +817,13 @@ function handleIssueRoute(
 
   if (tail.length === 1) {
     if (method === 'GET') {
-      sendJson(res, 200, issueJson(repo, issue));
+      serveIssue(res, repo, issue);
       return true;
     }
     if (method === 'PATCH') {
+      // Clear the cached body first: the label check below can 422 after the state/title/body
+      // assignments, and a stale cache must never outlive a partial mutation.
+      invalidateIssueJson(issue);
       const state = bodyString(jsonBody, 'state');
       if (state === 'open' || state === 'closed') {
         issue.state = state;
@@ -806,7 +844,7 @@ function handleIssueRoute(
         issue.labels = labels;
       }
       issue.updatedAt = nextTimestampIso();
-      sendJson(res, 200, issueJson(repo, issue));
+      sendFreshIssue(res, 200, repo, issue);
       return true;
     }
     sendError(res, 404, 'Not Found');
@@ -823,6 +861,7 @@ function handleIssueRoute(
       const now = nextTimestampIso();
       const comment = { id: repo.nextCommentId++, body, userLogin: repo.owner, createdAt: now, updatedAt: now };
       issue.comments.push(comment);
+      invalidateIssueJson(issue); // the comments count in the cached body just changed
       sendJson(res, 201, commentJson(repo, issue, comment));
       return true;
     }
@@ -839,7 +878,7 @@ function handleIssueRoute(
 function handlePullRoute(
   req: IncomingMessage,
   res: ServerResponse,
-  url: URL,
+  url: RequestUrl,
   repo: Repo,
   tail: string[],
   method: string,

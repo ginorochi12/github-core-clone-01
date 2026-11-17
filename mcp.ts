@@ -15,7 +15,7 @@
  *   token gets HTTP 401. Unknown tools get -32602, never a 500.
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { isAuthenticated, parseJsonBody, sendEmpty, sendJson } from './httputil.ts';
+import { isAuthenticated, parseJsonBody, sendEmpty, sendJson, type RequestUrl } from './httputil.ts';
 import {
   createIssueObject,
   createPullObject,
@@ -275,7 +275,7 @@ export function handleMcp(
   req: IncomingMessage,
   res: ServerResponse,
   pathname: string,
-  _url: URL,
+  _url: RequestUrl,
   body: Buffer,
 ): boolean {
   if (pathname !== '/mcp') return false;
