@@ -15,8 +15,7 @@
  * - 401 without a valid bearer token; 400 for a malformed JSON body or a
  *   document that does not parse.
  */
-import type { IncomingMessage, ServerResponse } from 'node:http';
-import { isAuthenticated, parseJsonBody, sendError, sendJson, type RequestUrl } from './httputil.ts';
+import { isAuthenticated, parseJsonBody, sendError, sendJson, type ForgeRequest, type ForgeResponse, type RequestUrl } from './httputil.ts';
 import {
   createIssueObject,
   createPullObject,
@@ -1149,8 +1148,8 @@ function executeOperation(input: GraphQLOperationInput): { data: unknown; errors
  * handlers. Returns true when the path was /api/graphql (handled).
  */
 export function handleGraphQL(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: ForgeRequest,
+  res: ForgeResponse,
   pathname: string,
   _url: RequestUrl,
   body: Buffer,

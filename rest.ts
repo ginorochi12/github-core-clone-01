@@ -4,7 +4,6 @@
 // Shape checking in the suite allows extra fields, so the objects carry GitHub's usual
 // extras beside the asserted ones.
 
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import { nextTimestampIso } from './clock.ts';
 import { isObjectId } from './gitobj.ts';
 import {
@@ -38,6 +37,8 @@ import {
   sendError,
   sendJson,
   JSON_TYPE,
+  type ForgeRequest,
+  type ForgeResponse,
   type RequestUrl,
 } from './httputil.ts';
 
@@ -95,7 +96,7 @@ export function issueJson(repo: Repo, issue: Issue): Record<string, unknown> {
  * cache hit is byte-identical to a fresh build. The read benchmark GETs one issue 2,000
  * times, so this removes the object build, the stringify and the buffer allocation per read.
  */
-function serveIssue(res: ServerResponse, repo: Repo, issue: Issue): void {
+function serveIssue(res: ForgeResponse, repo: Repo, issue: Issue): void {
   const cached = issue.cachedJson;
   if (cached !== undefined) {
     sendBuffer(res, 200, cached, JSON_TYPE);
@@ -107,7 +108,7 @@ function serveIssue(res: ServerResponse, repo: Repo, issue: Issue): void {
 }
 
 /** Answer a create/PATCH with a freshly built body, and cache it: the issue just changed. */
-function sendFreshIssue(res: ServerResponse, status: number, repo: Repo, issue: Issue): void {
+function sendFreshIssue(res: ForgeResponse, status: number, repo: Repo, issue: Issue): void {
   const buf = jsonBuffer(issueJson(repo, issue));
   issue.cachedJson = buf;
   sendBuffer(res, status, buf, JSON_TYPE);
@@ -192,7 +193,7 @@ function pageParams(url: RequestUrl): PageParams {
 }
 
 /** Slice a list into one page and build GitHub's Link header (absolute, same-origin URLs). */
-function paginate<T>(req: IncomingMessage, url: RequestUrl, items: readonly T[]): { page: T[]; link: string | null } {
+function paginate<T>(req: ForgeRequest, url: RequestUrl, items: readonly T[]): { page: T[]; link: string | null } {
   const { page, perPage } = pageParams(url);
   const total = items.length;
   const totalPages = Math.max(1, Math.ceil(total / perPage));
@@ -214,7 +215,7 @@ function paginate<T>(req: IncomingMessage, url: RequestUrl, items: readonly T[])
   return { page: slice, link: links.length > 0 ? links.join(', ') : null };
 }
 
-function sendPage<T>(req: IncomingMessage, res: ServerResponse, url: RequestUrl, items: readonly T[]): void {
+function sendPage<T>(req: ForgeRequest, res: ForgeResponse, url: RequestUrl, items: readonly T[]): void {
   const { page, link } = paginate(req, url, items);
   sendJson(res, 200, page, link === null ? {} : { link });
 }
@@ -252,7 +253,7 @@ function contentsBranch(repo: Repo, body: Record<string, unknown>): string {
   return branch !== undefined && branch !== '' ? branch : repo.defaultBranch;
 }
 
-function handleGetContents(req: IncomingMessage, res: ServerResponse, repo: Repo, url: RequestUrl, path: string): void {
+function handleGetContents(req: ForgeRequest, res: ForgeResponse, repo: Repo, url: RequestUrl, path: string): void {
   const ref = url.searchParams.get('ref') ?? repo.defaultBranch;
   const commit = resolveRef(repo, ref);
   if (commit === null) {
@@ -303,7 +304,7 @@ function dirEntry(repo: Repo, entry: { mode: string; name: string; oid: string }
   return { type: 'file', encoding: 'base64', name: entry.name, path, sha: entry.oid, size };
 }
 
-function handlePutContents(res: ServerResponse, repo: Repo, path: string, body: Record<string, unknown>): void {
+function handlePutContents(res: ForgeResponse, repo: Repo, path: string, body: Record<string, unknown>): void {
   const message = bodyString(body, 'message') ?? '';
   const contentB64 = bodyString(body, 'content');
   if (contentB64 === undefined) {
@@ -354,7 +355,7 @@ function handlePutContents(res: ServerResponse, repo: Repo, path: string, body: 
   });
 }
 
-function handleDeleteContents(res: ServerResponse, repo: Repo, path: string, body: Record<string, unknown>): void {
+function handleDeleteContents(res: ForgeResponse, repo: Repo, path: string, body: Record<string, unknown>): void {
   const message = bodyString(body, 'message') ?? '';
   const branch = contentsBranch(repo, body);
   const tip = branchTip(repo, branch);
@@ -485,8 +486,8 @@ export function mergePullObject(repo: Repo, pull: PullRequest): { sha: string } 
  * Handle /api/v3/... Returns true when the path was under /api/v3 (handled); false otherwise.
  */
 export function handleRest(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: ForgeRequest,
+  res: ForgeResponse,
   pathname: string,
   url: RequestUrl,
   body: Buffer,
@@ -590,8 +591,8 @@ export function handleRest(
 }
 
 function handleRepoRoute(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: ForgeRequest,
+  res: ForgeResponse,
   url: RequestUrl,
   repo: Repo,
   rest: string[],
@@ -763,8 +764,8 @@ function handleRepoRoute(
 }
 
 function handleIssueRoute(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: ForgeRequest,
+  res: ForgeResponse,
   url: RequestUrl,
   repo: Repo,
   tail: string[],
@@ -876,8 +877,8 @@ function handleIssueRoute(
 }
 
 function handlePullRoute(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: ForgeRequest,
+  res: ForgeResponse,
   url: RequestUrl,
   repo: Repo,
   tail: string[],

@@ -16,7 +16,6 @@
 //   a refused ref is `ng <ref> non-fast-forward` (that exact reason for a non-fast-forward).
 // - A push's pack objects are stored even when every ref is refused (unpack still succeeds).
 
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   ZERO_OID,
   collectReachable,
@@ -43,7 +42,7 @@ import {
   store,
   type Repo,
 } from './store.ts';
-import { isAuthenticated, sendBuffer, sendError, type RequestUrl } from './httputil.ts';
+import { isAuthenticated, sendBuffer, sendError, type ForgeRequest, type ForgeResponse, type RequestUrl } from './httputil.ts';
 
 const UPLOAD_ADVERTISEMENT = 'application/x-git-upload-pack-advertisement';
 const UPLOAD_RESULT = 'application/x-git-upload-pack-result';
@@ -132,7 +131,7 @@ function v0Advertisement(repo: Repo, service: 'git-upload-pack' | 'git-receive-p
   return Buffer.concat(parts);
 }
 
-function handleInfoRefs(req: IncomingMessage, res: ServerResponse, repo: Repo, url: RequestUrl): void {
+function handleInfoRefs(req: ForgeRequest, res: ForgeResponse, repo: Repo, url: RequestUrl): void {
   const service = url.searchParams.get('service');
   if (service !== 'git-upload-pack' && service !== 'git-receive-pack') {
     sendError(res, 400, 'a service parameter naming git-upload-pack or git-receive-pack is required');
@@ -659,8 +658,8 @@ function handleReceivePack(repo: Repo, body: Buffer): Buffer {
  * false when it is not one at all (the caller falls through to its own 404).
  */
 export function handleGit(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: ForgeRequest,
+  res: ForgeResponse,
   pathname: string,
   url: RequestUrl,
   body: Buffer,

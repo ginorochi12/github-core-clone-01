@@ -9,17 +9,20 @@
  * - /{owner}/{repo}.git/* -> git smart HTTP (githttp.ts)
  * - anything else -> 404 JSON {"message": "Not Found"}
  *
- * The request body is read once here and passed to the handlers, which are
- * synchronous. No request handler is allowed to throw out of the server: an
- * unexpected error becomes a 500 JSON reply and the process stays up (the
- * suite's repo-survives-errors check exercises exactly this).
+ * The transport is a raw node:net server (transport.ts): it parses each
+ * request and reads its whole body before routing, so this module and every
+ * handler are fully synchronous — no promise per request. No request handler
+ * is allowed to throw out of the server: an unexpected error becomes a 500
+ * JSON reply and the process stays up (the suite's repo-survives-errors
+ * check exercises exactly this).
  */
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import type { Server } from 'node:http';
 import { handleGit } from './githttp.ts';
 import { handleGraphQL } from './graphql.ts';
-import { EMPTY_SEARCH_PARAMS, readBody, sendError, sendJson, type RequestUrl } from './httputil.ts';
+import { EMPTY_SEARCH_PARAMS, sendError, sendJson, type ForgeRequest, type ForgeResponse, type RequestUrl } from './httputil.ts';
 import { handleMcp } from './mcp.ts';
 import { handleRest } from './rest.ts';
+import { createRawServer } from './transport.ts';
 
 /**
  * Whether the WHATWG URL parser would leave this request target's path byte-identical:
@@ -43,7 +46,7 @@ function isPlainPath(raw: string): boolean {
   );
 }
 
-async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
+function route(req: ForgeRequest, res: ForgeResponse, body: Buffer): void {
   const raw = req.url ?? '/';
   let pathname: string;
   let url: RequestUrl;
@@ -72,24 +75,6 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     return;
   }
 
-  // Only read a body when the request declares one. GET/HEAD (and bodyless
-  // DELETEs) carry none; skipping the read avoids a promise plus three stream
-  // listeners per request on the hottest paths (the read benchmark's 2,000 GETs).
-  const hasBody =
-    (req.headers['content-length'] !== undefined && req.headers['content-length'] !== '0') ||
-    req.headers['transfer-encoding'] !== undefined;
-  let body: Buffer;
-  if (hasBody) {
-    try {
-      body = await readBody(req);
-    } catch {
-      sendError(res, 413, 'Request Entity Too Large');
-      return;
-    }
-  } else {
-    body = Buffer.alloc(0);
-  }
-
   if (pathname === '/api/v3' || pathname.startsWith('/api/v3/')) {
     if (handleRest(req, res, pathname, url, body)) return;
   } else if (pathname === '/api/graphql') {
@@ -104,10 +89,16 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   sendError(res, 404, 'Not Found');
 }
 
-/** Build the HTTP server main.ts binds and registers. */
+/**
+ * Build the server main.ts binds and registers. It is a node:net server,
+ * which has every method main.ts uses (listen, address, on/once, close,
+ * closeAllConnections); the cast keeps the declared type main.ts expects.
+ */
 export function createApp(): Server {
-  return createServer((req, res) => {
-    route(req, res).catch((err: unknown) => {
+  const server = createRawServer((req, res, body) => {
+    try {
+      route(req, res, body);
+    } catch (err) {
       try {
         if (!res.headersSent) {
           sendError(res, 500, err instanceof Error ? err.message : 'Internal Server Error');
@@ -117,6 +108,7 @@ export function createApp(): Server {
       } catch {
         // The socket is already gone; nothing left to do.
       }
-    });
+    }
   });
+  return server as unknown as Server;
 }

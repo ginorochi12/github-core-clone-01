@@ -14,8 +14,7 @@
  * - A body that is not JSON gets HTTP 400 with JSON-RPC -32700. No bearer
  *   token gets HTTP 401. Unknown tools get -32602, never a 500.
  */
-import type { IncomingMessage, ServerResponse } from 'node:http';
-import { isAuthenticated, parseJsonBody, sendEmpty, sendJson, type RequestUrl } from './httputil.ts';
+import { isAuthenticated, parseJsonBody, sendEmpty, sendJson, type ForgeRequest, type ForgeResponse, type RequestUrl } from './httputil.ts';
 import {
   createIssueObject,
   createPullObject,
@@ -122,11 +121,11 @@ const TOOLS: readonly ToolDef[] = Object.freeze([
 
 type JsonRpcId = string | number | null;
 
-function rpcResult(res: ServerResponse, id: JsonRpcId, result: unknown): void {
+function rpcResult(res: ForgeResponse, id: JsonRpcId, result: unknown): void {
   sendJson(res, 200, { jsonrpc: '2.0', id, result });
 }
 
-function rpcError(res: ServerResponse, id: JsonRpcId, code: number, message: string, httpStatus = 200): void {
+function rpcError(res: ForgeResponse, id: JsonRpcId, code: number, message: string, httpStatus = 200): void {
   sendJson(res, httpStatus, { jsonrpc: '2.0', id, error: { code, message } });
 }
 
@@ -272,8 +271,8 @@ function callTool(name: string, args: Record<string, unknown>): ToolCallOutcome 
  * the path was /mcp (handled).
  */
 export function handleMcp(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: ForgeRequest,
+  res: ForgeResponse,
   pathname: string,
   _url: RequestUrl,
   body: Buffer,
